@@ -96,6 +96,17 @@ class DemoResetTest extends TestCase
         Storage::disk('public')->assertExists('tipe/1/a.jpg');
     }
 
+    public function test_jumlah_tabel_pratinjau_hanya_menghitung_database_aktif(): void
+    {
+        $this->izinkanDatabaseTest();
+        $jumlah = DB::scalar('select count(*) from information_schema.tables where table_schema = database() and table_type = ?', ['BASE TABLE']);
+
+        $this->artisan('demo:reset')
+            ->expectsOutputToContain("Tabel    : {$jumlah} ")
+            ->expectsConfirmation('Semua data di database "rental_mobil_test" akan HILANG. Lanjutkan?', 'no')
+            ->assertFailed();
+    }
+
     public function test_tanpa_konfirmasi_dibatalkan_dan_tidak_ada_yang_berubah(): void
     {
         $this->izinkanDatabaseTest();

@@ -44,7 +44,7 @@ class DemoReset extends Command
         $folder = config('rental.folder_upload');
         $this->line('<info>Sebelum reset</info>');
         $this->line("  Database : {$db}");
-        $this->line('  Tabel    : '.count(Schema::getTables()).' (seluruhnya akan dihapus lalu dibuat ulang)');
+        $this->line('  Tabel    : '.count(Schema::getTables($db)).' (seluruhnya akan dihapus lalu dibuat ulang)');
         $this->line('  Berkas   : akan dihapus dari '.$this->daftarFolder($folder));
 
         if (! $this->option('force') && ! $this->confirm("Semua data di database \"{$db}\" akan HILANG. Lanjutkan?", false)) {
