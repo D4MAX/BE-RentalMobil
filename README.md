@@ -2,7 +2,7 @@
 
 <p align="center">
 <img src="https://img.shields.io/badge/Laravel-13-FF2D20?logo=laravel&logoColor=white" alt="Laravel 13">
-<img src="https://img.shields.io/badge/PHP-8.3%2B-777BB4?logo=php&logoColor=white" alt="PHP 8.3+">
+<img src="https://img.shields.io/badge/PHP-8.4%2B-777BB4?logo=php&logoColor=white" alt="PHP 8.4+">
 <img src="https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white" alt="MySQL">
 <img src="https://img.shields.io/badge/Midtrans-sandbox-0B5FFF" alt="Midtrans">
 </p>
@@ -11,7 +11,7 @@
 
 Backend untuk sistem penyewaan mobil PT GantengnyaJatim (Malang). Dibuat untuk proyek capstone. Isinya API REST yang dipakai pelanggan untuk memesan dan membayar sewa, dan admin untuk mengelola armada, serah terima, pengembalian, servis, dan laporan.
 
-Teknologi: Laravel 13 (PHP 8.3+), MySQL, Laravel Sanctum, Midtrans (pembayaran).
+Teknologi: Laravel 13 (PHP 8.4+), MySQL, Laravel Sanctum, Midtrans (pembayaran).
 
 Dokumen lain di repo ini:
 
