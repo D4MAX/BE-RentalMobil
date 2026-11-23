@@ -1,0 +1,3629 @@
+openapi: 3.0.3
+info:
+  title: API Sistem Rental Mobil
+  version: 1.5.0
+  description:
+    "Spesifikasi untuk menguji backend Laravel lewat Swagger UI. Sesuai kode: **semua rute di dokumen ini sudah ada**.
+
+
+    **Cara pakai:** jalankan `php artisan serve`, buka `/docs`, pilih server Laravel, panggil `POST /auth/login`, salin `data.token`, klik **Authorize** dan tempel token (tanpa kata `Bearer`).
+
+
+    - Admin dengan kata sandi sementara (`wajib_ganti_password: true`) hanya bisa memanggil `PUT /profil/password` dan logout.
+
+    - Semua tanggal dan jam memakai zona WIB.
+
+    - Admin tidak punya endpoint pembatalan; admin hanya menyetujui atau menolak pengajuan pelanggan.
+
+    "
+servers:
+  - url: /
+    description: Server yang sedang membuka /docs (lokal atau ngrok)
+  - url: http://127.0.0.1:8000
+    description: Laravel (lokal)
+  - url: http://127.0.0.1:4010
+    description: Mock Prism (opsional)
+tags:
+  - name: Auth
+    description: Daftar, verifikasi email, login, kata sandi
+  - name: Profil
+    description: Profil user
+  - name: Katalog
+    description: "Publik: tipe, tarif, sisa unit"
+  - name: Pemesanan (user)
+    description: Pesanan milik user
+  - name: Webhook
+    description: Notifikasi Midtrans
+  - name: Admin - Pemesanan
+    description: Daftar, detail, serah terima, pengembalian, pembatalan
+  - name: Admin - Tipe
+    description: Kelola tipe kendaraan
+  - name: Admin - Unit
+    description: Kelola unit dan detail kendaraan
+  - name: Admin - Tempat Sampah
+    description: Soft delete tipe dan unit, pemulihan, dan hapus permanen
+  - name: Admin - Servis
+    description: Servis berkala
+  - name: Admin - Dashboard dan Laporan
+    description: Dashboard dan laporan
+paths:
+  /api/v1/auth/register:
+    post:
+      tags:
+        - Auth
+      summary: Register user
+      description: "multipart/form-data, tiap field satu kolom (tidak ada field file). Akun dibuat belum terverifikasi; tautan verifikasi dikirim lewat email (12 jam). Tidak ada token. Email yang sudah dipakai dijawab 422. Akun belum terverifikasi baru bisa ditimpa pendaftaran ulang setelah 60 menit sejak dibuat dan sebelum 30 hari; di dalam 60 menit pertama pendaftaran ulang ditolak 422."
+      security: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Akun dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Budi Santoso
+                  email: budi@email.com
+                message: Cek email Anda untuk verifikasi
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          description: Lebih dari 10 pendaftaran per jam dari satu IP
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Terlalu banyak percobaan, coba lagi nanti
+                code: TERLALU_BANYAK_PERCOBAAN
+  /api/v1/auth/verifikasi-email:
+    post:
+      tags:
+        - Auth
+      summary: Verifikasi email lewat tautan
+      description: Token sekali pakai, berlaku 12 jam.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  example: abc123token
+              required:
+                - token
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                message: Email terverifikasi
+        "422":
+          description: Token tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Token tidak valid atau kedaluwarsa
+                code: TOKEN_TIDAK_VALID
+  /api/v1/auth/kirim-ulang-verifikasi:
+    post:
+      tags:
+        - Auth
+      summary: Kirim ulang tautan verifikasi
+      description: "Maksimal 3 kali per jam. Email tidak terdaftar dijawab 404, akun yang sudah terverifikasi dijawab 409 EMAIL_SUDAH_TERVERIFIKASI (tidak ada email yang dikirim; arahkan pengguna ke Login). Gagal kirim email (SMTP) tetap dijawab 200 dan hanya tercatat di log server."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: budi@email.com
+              required:
+                - email
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                message: Tautan verifikasi dikirim
+        "404":
+          description: Email tidak ada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Email tidak terdaftar
+                code: EMAIL_TIDAK_TERDAFTAR
+        "409":
+          description: Email sudah terverifikasi
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Email sudah terverifikasi, silakan login
+                code: EMAIL_SUDAH_TERVERIFIKASI
+        "429":
+          description: Lebih dari 3 kali per jam
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Terlalu banyak percobaan
+                code: TERLALU_BANYAK
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Auth
+      summary: Login
+      description: "Satu endpoint untuk semua peran. Masa berlaku token: user 60 menit, admin 30 menit (TOKEN_USER_MENIT dan TOKEN_ADMIN_MENIT di .env). Masa berlaku diperpanjang selama ada aktivitas (idle timeout, tanpa refresh token): permintaan terautentikasi yang BERHASIL memperpanjang token sampai masa berlaku penuh lagi, tetapi hanya bila sisa waktunya tinggal separuh atau kurang (hemat query). Permintaan yang gagal (4xx, 5xx) dan token yang sudah kedaluwarsa tidak memperpanjang. Token kedaluwarsa dijawab 401 BELUM_LOGIN seperti token tidak valid; login ulang. Batas percobaan: 5 per menit per IP dan 10 per jam per email (huruf besar dan kecil dianggap sama; percobaan berhasil maupun gagal sama-sama dihitung). Lewat salah satunya dijawab 429 TERLALU_BANYAK_PERCOBAAN dengan header Retry-After."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            example:
+              email: nama@email.com
+              password: kata-sandi-anda
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  token: 1|contoh-token-sanctum
+                  user:
+                    id: 1
+                    nama: Budi Santoso
+                    role: user
+                  wajib_ganti_password: false
+        "401":
+          description: Kredensial salah
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Email atau kata sandi salah
+                code: KREDENSIAL_SALAH
+        "403":
+          description: Email belum diverifikasi (EMAIL_BELUM_TERVERIFIKASI) atau akun nonaktif (AKUN_NONAKTIF)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Email belum diverifikasi
+                code: EMAIL_BELUM_TERVERIFIKASI
+        "429":
+          description: Lebih dari 5 percobaan per menit dari satu IP, atau lebih dari 10 per jam untuk satu email
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Terlalu banyak percobaan
+                code: TERLALU_BANYAK_PERCOBAAN
+  /api/v1/auth/logout:
+    post:
+      tags:
+        - Auth
+      summary: Logout
+      description: Mencabut token saat ini.
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Berhasil keluar
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/lupa-password:
+    post:
+      tags:
+        - Auth
+      summary: Lupa kata sandi
+      description: "Selalu 200 dengan pesan yang sama, email terdaftar atau tidak (anti enumerasi). Bila terdaftar dan aktif, email berisi tautan FRONTEND_URL/reset-password?token=<token>&email=<email> (berlaku 60 menit, sekali pakai) dikirim, dengan token mentah 64 karakter di bawah tautan sebagai cadangan untuk tes di Swagger; token lama akun itu dibatalkan. Maksimal 5 permintaan per menit per IP (429). Di dev (MAIL_MAILER=log) isi email ada di storage/logs/laravel.log: cari baris yang hanya berisi token 64 karakter. Batas: 5 per menit per IP dan 3 per jam per email (huruf besar dan kecil dianggap sama), email terdaftar atau tidak; lewat salah satunya dijawab 429 TERLALU_BANYAK_PERCOBAAN."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: budi@email.com
+              required:
+                - email
+      responses:
+        "200":
+          description: Selalu sama
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                message: Jika email terdaftar, instruksi reset kata sandi telah dikirim
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          description: Lebih dari 5 permintaan per menit dari satu IP, atau lebih dari 3 per jam untuk satu email
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Terlalu banyak percobaan, coba lagi nanti
+                code: TERLALU_BANYAK_PERCOBAAN
+  /api/v1/auth/reset-password:
+    post:
+      tags:
+        - Auth
+      summary: Reset kata sandi dengan token
+      description: "Token dari email lupa-password. Berhasil: kata sandi baru disimpan, wajib_ganti_password turun, email dianggap terverifikasi, token reset dihapus, dan SEMUA token login akun dicabut (login ulang). Aturan kata sandi sama dengan register (minimal 8 karakter dan ada angka). Maksimal 5 percobaan per menit per IP (429, hitungan terpisah dari lupa-password). Nama field konfirmasi lama password_confirmation tetap diterima."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: budi@email.com
+                token:
+                  type: string
+                  example: Zk3x9QmT1vB7nRw2LhY8cUdE5pAfJgS4oXiN6tVyKqMbWrCjHlDeGzPaOuIs0FtX
+                password:
+                  type: string
+                  example: baru12345
+                  minLength: 8
+                konfirmasi:
+                  type: string
+                  example: baru12345
+              required:
+                - email
+                - token
+                - password
+                - konfirmasi
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                message: Kata sandi berhasil direset, silakan login
+        "422":
+          description: "Validasi gagal (kata sandi tidak memenuhi aturan atau konfirmasi tidak cocok), atau token bermasalah: TOKEN_RESET_TIDAK_VALID (token salah, email tidak cocok, atau sudah dipakai) dan TOKEN_RESET_KEDALUWARSA (lewat 60 menit)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                tokenTidakValid:
+                  summary: Token salah atau sudah dipakai
+                  value:
+                    message: Token reset tidak valid
+                    code: TOKEN_RESET_TIDAK_VALID
+                tokenKedaluwarsa:
+                  summary: Token lewat 60 menit
+                  value:
+                    message: Token reset sudah kedaluwarsa, minta token baru
+                    code: TOKEN_RESET_KEDALUWARSA
+                validasi:
+                  summary: Kata sandi tidak memenuhi aturan
+                  value:
+                    message: Data yang dikirim tidak valid
+                    code: VALIDASI_GAGAL
+                    errors:
+                      password:
+                        - Kata sandi harus mengandung angka
+        "429":
+          $ref: "#/components/responses/TerlaluBanyak"
+  /api/v1/me:
+    get:
+      tags:
+        - Auth
+      summary: Data akun yang login
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Budi Santoso
+                  email: budi@email.com
+                  role: user
+                  no_hp: 081234567890
+                  provinsi: Jawa Timur
+                  kota: Kota Malang
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/profil:
+    get:
+      tags:
+        - Profil
+      summary: Lihat profil sendiri
+      description: "Semua peran yang sudah login. Tanpa kata sandi dan tanpa no_identitas. Admin hanya punya nama dan email; kolom kontak bernilai null. foto berisi URL foto profil (null bila belum ada); diubah lewat POST /profil."
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Budi Santoso
+                  email: budi@email.com
+                  role: user
+                  no_hp: "081234567890"
+                  provinsi: Jawa Timur
+                  kota: Kota Malang
+                  foto: null
+                  email_terverifikasi: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Admin dengan kata sandi sementara (GANTI_PASSWORD_DULU)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Ganti kata sandi sementara Anda terlebih dahulu
+                code: GANTI_PASSWORD_DULU
+    post:
+      tags:
+        - Profil
+      summary: Ubah profil sendiri (dengan foto opsional)
+      description: "multipart/form-data (form), BUKAN JSON, karena PHP tidak membaca PUT multipart; PUT dan PATCH /profil tidak ada lagi (405). Hanya field yang dikirim yang diubah. User: nama, no_hp, provinsi, kota. Admin: hanya nama. Email TIDAK bisa diubah (field email diabaikan), begitu pula no_identitas dan role. Foto: tanpa field foto, foto lama tetap dan tetap muncul di respons; foto baru (jpg, jpeg, png, webp, maks 2 MB) mengganti foto lama dan berkas lama dihapus; hapus_foto=true menghapus foto (menjadi null). Foto disimpan di disk publik dan ditampilkan sebagai URL. Kata sandi diganti lewat PUT /profil/password."
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ProfilForm"
+      responses:
+        "200":
+          description: Berhasil, isi sama dengan GET /profil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Budi Santoso
+                  email: budi@email.com
+                  role: user
+                  no_hp: "081234567890"
+                  provinsi: Jawa Timur
+                  kota: Kota Malang
+                  foto: http://localhost:8000/storage/profil/1/abc123.jpg
+                  email_terverifikasi: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/profil/password:
+    put:
+      tags:
+        - Profil
+      summary: Ganti kata sandi
+      description: "Semua peran. Kata sandi lama harus cocok. Berhasil: token login LAIN milik akun dicabut, token yang sedang dipakai tetap hidup, dan wajib_ganti_password turun. Boleh dipanggil admin dengan kata sandi sementara. Aturan kata sandi baru sama dengan register."
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/GantiPassword"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                message: Kata sandi berhasil diganti
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Kata sandi lama salah, kata sandi baru tidak memenuhi aturan, atau konfirmasi tidak cocok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Data yang dikirim tidak valid
+                code: VALIDASI_GAGAL
+                errors:
+                  password_lama:
+                    - Kata sandi lama salah
+  /api/v1/katalog/tipe:
+    get:
+      tags:
+        - Katalog
+      summary: Daftar tipe tersedia menurut tanggal
+      description: Tipe dengan sisa_unit 0 tidak ditampilkan.
+      security: []
+      parameters:
+        - name: tgl_mulai
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "2026-12-10"
+          description: Paling cepat besok, paling jauh 30 hari
+        - name: durasi
+          in: query
+          required: true
+          schema:
+            type: integer
+          example: 3
+          description: 1 sampai 30
+        - name: kursi
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["any", "2", "4", "5", "6", "7", "8", "9"]
+            default: any
+          description: "Jumlah kursi, atau any untuk semua. Cocok persis (5 hanya tipe 5 kursi). Daftar di sini hanya contoh umum; server menerima angka apa pun, dan frontend sebaiknya mengisi pilihan dari kursi pada daftar tipe yang dikembalikan."
+        - name: transmisi
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [any, manual, matic]
+            default: any
+          description: "manual, matic, atau any untuk semua. Tipe tampil bila punya minimal satu unit tersedia dengan transmisi itu."
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  - id: 1
+                    nama: Brio
+                    merk: Honda
+                    kursi: 5
+                    bahan_bakar: bensin
+                    tarif: &id001
+                      dengan_sopir: 650000
+                      lepas_kunci_manual: 300000
+                      lepas_kunci_matic: 350000
+                    foto: &id002
+                      - https://contoh.id/brio-1.jpg
+                    rating_rata: 4.8
+                    sisa_unit: 2
+                  - id: 2
+                    nama: Avanza
+                    merk: Toyota
+                    kursi: 7
+                    bahan_bakar: bensin
+                    tarif: *id001
+                    foto: *id002
+                    rating_rata: 4.8
+                    sisa_unit: 1
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/katalog/tipe/{id}:
+    get:
+      tags:
+        - Katalog
+      summary: Detail tipe
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+          description: ID tipe
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Brio
+                  merk: Honda
+                  kursi: 5
+                  bahan_bakar: bensin
+                  tarif: *id001
+                  foto: *id002
+                  rating_rata: 4.8
+                  sisa_unit: 2
+                  spesifikasi:
+                    transmisi: manual atau matic
+                    bagasi: ukuran sedang
+                  review:
+                    - nama: Budi
+                      rating: 5
+                      komentar: Mobil bersih dan nyaman
+                      tgl_review: "2026-10-14"
+        "404":
+          description: Tipe tidak ada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tipe tidak ditemukan
+                code: TIDAK_DITEMUKAN
+  /api/v1/info:
+    get:
+      tags:
+        - Katalog
+      summary: Info publik
+      description: Jam operasional dan data kontak (teks).
+      security: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  jam_operasional: 07.00-21.00
+                  alamat: Jl. Joyo Agung No. 103, Malang
+                  telepon: 0812-3456-7890
+                  email: kontak@gantengnyajatim.id
+                  batas_antar_gratis: Tlogomas
+  /api/v1/pemesanan:
+    post:
+      tags:
+        - Pemesanan (user)
+      summary: Buat pesanan
+      description: Dibuat dalam database transaction dengan lockForUpdate. Panggilan Midtrans dilakukan di luar transaksi.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/PemesananBuat"
+      responses:
+        "201":
+          description: Pesanan dibuat, menunggu pembayaran
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 15
+                  nomor: PSN-0015
+                  status: menunggu_pembayaran
+                  tgl_mulai: "2026-12-10"
+                  durasi: 3
+                  tgl_kembali: "2026-12-12"
+                  total_biaya: 900000
+                  batas_pembayaran: "2026-11-13T11:40:00+07:00"
+                  midtrans:
+                    snap_token: mock-snap-token
+                    order_id: PSN-0015-1
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: "Unit habis; kode lain: TAGIHAN_BELUM_LUNAS, PESANAN_MENUNGGU_ADA, SOPIR_TIDAK_TERSEDIA"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Mobil sudah dipesan pada tanggal tersebut
+                code: UNIT_TIDAK_TERSEDIA
+        "422":
+          $ref: "#/components/responses/Validation"
+        "502":
+          description: Gateway pembayaran gagal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pembayaran gagal dibuat
+                code: PEMBAYARAN_GAGAL
+    get:
+      tags:
+        - Pemesanan (user)
+      summary: Daftar pesanan saya
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tab
+          in: query
+          required: false
+          schema:
+            type: string
+          example: berlangsung
+          description: berlangsung atau riwayat
+        - &id004
+          name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - &id005
+          name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  - id: 15
+                    nomor: PSN-0015
+                    status: dikonfirmasi
+                    tipe:
+                      id: 1
+                      nama: Brio
+                    tgl_mulai: "2026-12-10"
+                    durasi: 3
+                    total_biaya: 900000
+                    aksi_utama: ajukan_pembatalan
+                meta:
+                  page: 1
+                  per_page: 10
+                  total: 1
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/pemesanan/{id}:
+    get:
+      tags:
+        - Pemesanan (user)
+      summary: Detail pesanan saya
+      description: Objek aksi menentukan tombol yang tampil.
+      security:
+        - bearerAuth: []
+      parameters:
+        - &id003
+          name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 15
+          description: ID pesanan
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 15
+                  nomor: PSN-0015
+                  status: dikonfirmasi
+                  tipe:
+                    id: 1
+                    nama: Brio
+                  jenis_sewa: lepas_kunci
+                  transmisi: manual
+                  tgl_mulai: "2026-12-10"
+                  durasi: 3
+                  tgl_kembali: "2026-12-12"
+                  jam_serah: 09:00
+                  metode_ambil: diantar
+                  lokasi_jemput: Jl. Veteran No. 5, Malang
+                  tujuan: null
+                  total_biaya: 900000
+                  plat_nomor: null
+                  pembayaran:
+                    metode: qris
+                    status: lunas
+                    order_id: PSN-0015-1
+                  tagihan_tambahan: null
+                  jaminan: null
+                  hasil_pemeriksaan: null
+                  aksi:
+                    bisa_bayar: false
+                    bisa_batalkan: false
+                    bisa_ajukan_pembatalan: true
+                    bisa_review: false
+                    bisa_unduh_nota: true
+                    bisa_perpanjang: false
+                    bisa_pesan_lagi: false
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Bukan milik user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pesanan tidak ditemukan
+                code: TIDAK_DITEMUKAN
+  /api/v1/pemesanan/{id}/pembayaran:
+    post:
+      tags:
+        - Pemesanan (user)
+      summary: Snap token untuk pesanan menunggu pembayaran
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  snap_token: mock-snap-token
+                  batas_pembayaran: "2026-11-13T11:40:00+07:00"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Sudah lewat 1 jam
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pembayaran tidak diterima dalam 1 jam
+                code: PEMBAYARAN_KEDALUWARSA
+  /api/v1/pemesanan/{id}/batalkan:
+    post:
+      tags:
+        - Pemesanan (user)
+      summary: Batalkan pesanan (menunggu pembayaran)
+      description: Hanya status menunggu_pembayaran.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: dibatalkan
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Bukan menunggu pembayaran
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Status pesanan tidak valid
+                code: STATUS_TIDAK_VALID
+  /api/v1/pemesanan/{id}/ajukan-pembatalan:
+    post:
+      tags:
+        - Pemesanan (user)
+      summary: Ajukan pembatalan (dikonfirmasi, paling lambat H-1)
+      description: Rekening refund (bank, no_rekening, nama_rekening) wajib bila channel pembayaran bank_transfer, echannel atau cstore. QRIS dan channel lain dicoba refund otomatis lewat Midtrans.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/AjukanPembatalan"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: pengajuan_pembatalan
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Lewat H-1 (atau STATUS_TIDAK_VALID)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pesanan tidak bisa dibatalkan
+                code: LEWAT_BATAS_H1
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/pemesanan/{id}/nota:
+    get:
+      tags:
+        - Pemesanan (user)
+      summary: Nota PDF
+      description: Hanya status dikonfirmasi ke atas.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Belum dibayar
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pesanan belum dibayar
+                code: STATUS_TIDAK_VALID
+  /api/v1/pemesanan/{id}/review:
+    post:
+      tags:
+        - Pemesanan (user)
+      summary: Beri rating dan review
+      description: Hanya status selesai, sekali per pesanan.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/ReviewBuat"
+      responses:
+        "201":
+          description: Review tersimpan
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  rating: 5
+                  komentar: Mobil bersih dan nyaman
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Sudah pernah menilai
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Review sudah ada
+                code: SUDAH_ADA_REVIEW
+  /api/v1/webhook/midtrans:
+    post:
+      tags:
+        - Webhook
+      summary: Notifikasi pembayaran Midtrans
+      description: "Publik tanpa token. Midtrans sendiri mengirim JSON; server juga menerima form seperti di sini, supaya mudah dicoba. signature_key = sha512(order_id + status_code + gross_amount + ServerKey), string gross_amount harus persis sama dengan yang dikirim. Hitung di terminal dengan kunci dari .env: php artisan tinker --execute=\"echo hash('sha512','PSN-0001-1'.'200'.'600000'.config('midtrans.server_key'));\" . Tanda tangan yang sama berlaku untuk semua status order itu. capture kartu hanya mengonfirmasi bila fraud_status accept (atau kosong); challenge ditahan. refund, partial_refund, dan chargeback hanya dicatat di log aktivitas. Idempoten."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                order_id:
+                  type: string
+                  example: PSN-0015-1
+                status_code:
+                  type: string
+                  example: "200"
+                gross_amount:
+                  type: string
+                  example: "900000.00"
+                signature_key:
+                  type: string
+                  example: contoh-tanda-tangan
+                transaction_status:
+                  type: string
+                  enum:
+                    - settlement
+                    - capture
+                    - pending
+                    - expire
+                    - deny
+                    - cancel
+                    - refund
+                    - partial_refund
+                    - chargeback
+                  example: settlement
+                fraud_status:
+                  type: string
+                  enum:
+                    - accept
+                    - challenge
+                    - deny
+                  description: "Hanya untuk kartu (capture). Kosong dianggap accept."
+                payment_type:
+                  type: string
+                  description: "Metode bayar, mis. qris, gopay, bank_transfer. Disimpan sebagai metode pembayaran."
+                  example: qris
+              required:
+                - order_id
+                - status_code
+                - gross_amount
+                - signature_key
+                - transaction_status
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                message: OK
+        "403":
+          description: Signature sha512 salah
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Signature tidak valid
+                code: SIGNATURE_TIDAK_VALID
+  /api/v1/admin/pemesanan:
+    get:
+      tags:
+        - Admin - Pemesanan
+      summary: Daftar semua pesanan
+      description: Hanya status, tanpa tombol aksi.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+          example: dikonfirmasi
+          description: Filter status
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          example: Budi
+          description: Nomor atau nama pelanggan
+        - *id004
+        - *id005
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  - id: 15
+                    nomor: PSN-0015
+                    tgl_pesan: "2026-11-13"
+                    pelanggan:
+                      nama: Budi Santoso
+                    tipe:
+                      nama: Brio
+                    plat_nomor: null
+                    tgl_mulai: "2026-12-10"
+                    status: dikonfirmasi
+                meta:
+                  page: 1
+                  per_page: 10
+                  total: 1
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Bukan admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tidak berhak
+                code: TIDAK_BERHAK
+  /api/v1/admin/pemesanan/{id}:
+    get:
+      tags:
+        - Admin - Pemesanan
+      summary: Detail pesanan lengkap
+      description: Termasuk pelanggan, log aktivitas (siapa dan kapan), dan objek aksi.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 15
+                  nomor: PSN-0015
+                  status: dikonfirmasi
+                  tipe:
+                    id: 1
+                    nama: Brio
+                  jenis_sewa: lepas_kunci
+                  transmisi: manual
+                  tgl_mulai: "2026-12-10"
+                  durasi: 3
+                  tgl_kembali: "2026-12-12"
+                  jam_serah: 09:00
+                  metode_ambil: diantar
+                  lokasi_jemput: Jl. Veteran No. 5, Malang
+                  tujuan: null
+                  total_biaya: 900000
+                  plat_nomor: null
+                  pembayaran:
+                    metode: qris
+                    status: lunas
+                    order_id: PSN-0015-1
+                  tagihan_tambahan: null
+                  jaminan: null
+                  hasil_pemeriksaan: null
+                  aksi:
+                    bisa_serahkan: true
+                    bisa_selesaikan: false
+                    bisa_setujui: false
+                    bisa_tolak: false
+                    bisa_tandai_lunas: false
+                    bisa_kembalikan_jaminan: false
+                  pelanggan:
+                    nama: Budi Santoso
+                    no_hp: 081234567890
+                    email: budi@email.com
+                    provinsi: Jawa Timur
+                    kota: Kota Malang
+                    no_identitas: null
+                  domisili: malang_raya
+                  serah_terima: null
+                  review: null
+                  catatan_admin: null
+                  log_aktivitas:
+                    - waktu: "2026-11-13T10:40:00+07:00"
+                      aksi: Pesanan dibuat
+                      oleh: Pelanggan
+                    - waktu: "2026-11-13T10:55:00+07:00"
+                      aksi: Pembayaran berhasil, status Dikonfirmasi
+                      oleh: Sistem
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Tidak ada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pesanan tidak ditemukan
+                code: TIDAK_DITEMUKAN
+  /api/v1/admin/pemesanan/{id}/catatan:
+    put:
+      tags:
+        - Admin - Pemesanan
+      summary: Simpan catatan admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                catatan_admin:
+                  type: string
+                  example: Bukti booking valid, kode ABC123
+              required:
+                - catatan_admin
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  catatan_admin: Bukti booking valid, kode ABC123
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/pemesanan/{id}/unit-tersedia:
+    get:
+      tags:
+        - Admin - Pemesanan
+      summary: Daftar plat bebas untuk Serahkan unit
+      description: Disaring sistem. Karena jatah dijamin database transaction, daftar tidak kosong untuk pesanan yang sudah dibayar; jika kosong itu kesalahan admin.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  unit:
+                    - id: 3
+                      plat_nomor: N 1234 AB
+                      warna: Putih
+                      km_terakhir: 45800
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Pesanan bukan dikonfirmasi
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Pesanan bukan berstatus dikonfirmasi
+                code: STATUS_TIDAK_VALID
+  /api/v1/admin/pemesanan/{id}/serah-terima:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Serahkan unit
+      description: "Status harus dikonfirmasi. HANYA menerima multipart/form-data (application/json dijawab 415 FORMAT_TIDAK_DIDUKUNG). Untuk lepas_kunci, tiap item jaminan fisik wajib berupa foto di foto_jaminan[item] (jpg atau png, maks 2 MB per berkas, disimpan di penyimpanan privat): malang_raya = ktp_asli, sim_c_asli, dokumen_tambahan, motor_stnk; luar_malang_raya = ktp_asli, sim_c_asli, dokumen_tambahan, booking_transportasi, booking_hotel. Foto yang kurang menolak serah terima dengan 422 per item dan status pesanan tidak berubah. Dengan sopir: tanpa jaminan, tanpa foto jaminan."
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/SerahTerimaForm"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: berjalan
+                  plat_nomor: N 1234 AB
+                  jaminan_status: ditahan
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Unit tidak bebas (atau STATUS_TIDAK_VALID)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Unit sudah tidak bebas
+                code: UNIT_TIDAK_BEBAS
+        "415":
+          description: Bukan multipart/form-data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Endpoint ini hanya menerima multipart/form-data
+                code: FORMAT_TIDAK_DIDUKUNG
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/admin/pemesanan/{id}/pengembalian:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Selesaikan pesanan (pengembalian dan pemeriksaan)
+      description: "HANYA multipart/form-data (application/json dijawab 415 FORMAT_TIDAK_DIDUKUNG). Field diratakan per bagian dan per jenis: kondisi[bagian], biaya[bagian], keterangan[bagian], foto[bagian], biaya_tambahan[jenis], keterangan_tambahan[jenis]. Denda per hari kalender sebesar tarif sewa per hari. Biaya antar luar Tlogomas diisi di biaya_tambahan[biaya_antar]. Jaminan (lepas_kunci) otomatis dikembalikan bila tagihan tambahan 0 atau langsung lunas (status_pembayaran_tagihan tunai atau transfer); bila tagihan belum lunas, jaminan ditahan dan otomatis dikembalikan begitu tagihan dilunasi lewat POST .../tagihan/lunas. Dengan sopir tidak punya jaminan (jaminan_status null). Jenis biaya tambahan: cuci, kelengkapan_hilang, biaya_antar, lainnya; tol dan parkir tidak dicatat karena dibayar langsung oleh penyewa saat perjalanan."
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/PengembalianForm"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: selesai
+                  ringkasan:
+                    biaya_sewa: 900000
+                    hari_terlambat: 1
+                    denda_keterlambatan: 300000
+                    kekurangan_bbm: 0
+                    biaya_kerusakan: 200000
+                    biaya_lain: 50000
+                    tagihan_tambahan: 550000
+                    total_akhir: 1450000
+                  tagihan_status: belum
+                  jaminan_status: ditahan
+                  unit_status: tersedia
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Bukan berjalan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Status pesanan tidak valid
+                code: STATUS_TIDAK_VALID
+        "415":
+          description: Bukan multipart/form-data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Endpoint ini hanya menerima multipart/form-data
+                code: FORMAT_TIDAK_DIDUKUNG
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/admin/pemesanan/{id}/pengembalian/preview:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Pratinjau ringkasan biaya pengembalian (tidak menyimpan)
+      description: "Body dan aturan sama dengan POST .../pengembalian (HANYA multipart/form-data), tetapi hanya menghitung ringkasan: tidak menyimpan apa pun, tidak menuntut foto, dan tidak menuntut disetujui_penyewa. Dipakai tampilan untuk menunjukkan denda, kekurangan BBM, kerusakan, dan biaya lain sebelum admin menyelesaikan pesanan."
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/PengembalianForm"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  ringkasan:
+                    biaya_sewa: 900000
+                    hari_terlambat: 1
+                    denda_keterlambatan: 300000
+                    kekurangan_bbm: 30000
+                    biaya_kerusakan: 200000
+                    biaya_lain: 0
+                    tagihan_tambahan: 530000
+                    total_akhir: 1430000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Bukan berjalan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Hanya pesanan berjalan yang bisa diselesaikan
+                code: STATUS_TIDAK_VALID
+        "415":
+          description: Bukan multipart/form-data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Endpoint ini hanya menerima multipart/form-data
+                code: FORMAT_TIDAK_DIDUKUNG
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/admin/pemesanan/{id}/setujui-pembatalan:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Setujui pengajuan pembatalan
+      description: Admin tidak bisa membatalkan sendiri; hanya menyetujui pengajuan user.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: dibatalkan
+                  refund:
+                    metode: qris
+                    cara: midtrans
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Bukan pengajuan_pembatalan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Status pesanan tidak valid
+                code: STATUS_TIDAK_VALID
+  /api/v1/admin/pemesanan/{id}/tolak-pembatalan:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Tolak pengajuan pembatalan
+      description: Status kembali ke status sebelumnya.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: dikonfirmasi
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/pemesanan/{id}/refund-selesai:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Tandai refund transfer admin selesai
+      description: Untuk pembayaran lunas dengan refund_cara=transfer_admin dan refund_selesai=false, apa pun status pesanannya. Bila ada lebih dari satu refund menunggu, `id_pembayaran` wajib (422 bila kosong).
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  refund_selesai: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Tidak ada refund menunggu
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tidak ada refund yang menunggu
+                code: STATUS_TIDAK_VALID
+        "422":
+          $ref: "#/components/responses/Validation"
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                id_pembayaran:
+                  type: integer
+                  example: 21
+  /api/v1/admin/pemesanan/{id}/tagihan/lunas:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Tandai tagihan tambahan dibayar
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  tagihan_status: lunas
+                  jaminan_status: dikembalikan
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Tidak ada tagihan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tidak ada tagihan
+                code: STATUS_TIDAK_VALID
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                metode:
+                  type: string
+                  enum:
+                    - tunai
+                    - transfer
+                  example: tunai
+  /api/v1/admin/pemesanan/{id}/jaminan/kembalikan:
+    post:
+      tags:
+        - Admin - Pemesanan
+      summary: Kembalikan jaminan
+      description: Hanya setelah tagihan lunas atau tidak ada tagihan.
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id003
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  jaminan_status: dikembalikan
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Tagihan tambahan belum lunas atau status tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tagihan belum lunas
+                code: TAGIHAN_BELUM_LUNAS
+  /api/v1/admin/review/{id}:
+    patch:
+      tags:
+        - Admin - Pemesanan
+      summary: Tampilkan atau sembunyikan review di katalog
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+          description: ID review
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                tampil_di_katalog:
+                  type: boolean
+                  example: true
+              required:
+                - tampil_di_katalog
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  tampil_di_katalog: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/tipe:
+    get:
+      tags:
+        - Admin - Tipe
+      summary: Daftar tipe
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  - &id007
+                    id: 1
+                    nama: Brio
+                    merk: Honda
+                    kursi: 5
+                    bahan_bakar: bensin
+                    harga_sopir_per_hari: 650000
+                    harga_lepas_kunci_manual: 300000
+                    harga_lepas_kunci_matic: 350000
+                    foto: 3
+                    jumlah_unit: 3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags:
+        - Admin - Tipe
+      summary: Tambah tipe
+      description: "multipart/form-data, maksimal 3 foto. nama dan merk dirapikan otomatis (spasi ditrim dan digabung, huruf kapital di awal tiap kata, mis. tOYOta menjadi Toyota; singkatan 1-3 huruf yang kapital semua seperti BMW atau CR-V dibiarkan). Kombinasi nama + merk unik tanpa peka huruf besar kecil; yang sudah ada dijawab 422 dengan code TIPE_SUDAH_ADA."
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/TipeInput"
+      responses:
+        "201":
+          description: Tipe disimpan
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data: *id007
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: "Validasi gagal; TIPE_SUDAH_ADA bila kombinasi nama + merk sudah ada di tipe AKTIF; TIPE_ADA_DI_SAMPAH bila sama dengan tipe di tempat sampah (detail memuat data lama untuk pop-up: pulihkan lewat POST /admin/tipe/{id}/pulihkan, atau hapus permanen lewat DELETE /admin/sampah/tipe/{id}?konfirmasi=true lalu kirim ulang)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                tipe_sudah_ada:
+                  summary: Bentrok dengan tipe aktif
+                  value:
+                    message: Tipe Avanza dengan merk Toyota sudah ada.
+                    code: TIPE_SUDAH_ADA
+                    errors:
+                      nama:
+                        - Tipe Avanza dengan merk Toyota sudah ada.
+                tipe_ada_di_sampah:
+                  summary: Bentrok dengan tipe di tempat sampah
+                  value:
+                    message: Tipe Avanza dengan merk Toyota ada di tempat sampah. Pulihkan tipe itu, atau hapus permanen dulu lalu buat ulang.
+                    code: TIPE_ADA_DI_SAMPAH
+                    errors:
+                      nama:
+                        - Tipe Avanza dengan merk Toyota ada di tempat sampah. Pulihkan tipe itu, atau hapus permanen dulu lalu buat ulang.
+                    detail:
+                      jenis: tipe
+                      id: 5
+                      nama: Avanza
+                      merk: Toyota
+                      kolom_bentrok: [nama, merk]
+                      dihapus_pada: "2026-11-20T09:15:00+07:00"
+                      sisa_hari: 28
+  /api/v1/admin/tipe/{id}:
+    get:
+      tags:
+        - Admin - Tipe
+      summary: Detail tipe
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+          description: ID tipe
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data: *id007
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags:
+        - Admin - Tipe
+      summary: Hapus tipe (ke tempat sampah)
+      description: "Soft delete: hanya mengisi deleted_at, tipe bisa dipulihkan lewat POST /admin/tipe/{id}/pulihkan. Foto dan berkasnya TIDAK dihapus. Tipe yang sudah di tempat sampah tidak muncul di katalog, daftar admin, dan ketersediaan, dan dijawab 404 di endpoint tipe. Aturan penolakan sama seperti sebelumnya (409 TIPE_MASIH_DIPAKAI bila masih punya unit aktif atau pemesanan). Dibuang permanen otomatis setelah hari_sampah hari (bawaan 30) oleh sampah:bersihkan, atau langsung lewat DELETE /admin/sampah/tipe/{id}. Foto satuan (DELETE /admin/tipe/{id}/foto/{id_foto}) tetap dihapus permanen."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+          description: ID tipe
+      responses:
+        "204":
+          description: Dipindahkan ke tempat sampah
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Masih punya unit atau pemesanan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Hapus unit tipe ini lebih dulu
+                code: TIPE_MASIH_DIPAKAI
+    post:
+      tags:
+        - Admin - Tipe
+      summary: Ubah tipe
+      description: "multipart/form-data, foto opsional, tanpa field _method (tidak ada PUT). Foto yang dikirim DITAMBAHKAN ke foto yang sudah ada; total foto per tipe maksimal 3 (lebih dari itu 422: penuh = \"Foto sudah 3 (maksimal 3). Hapus foto lama dulu sebelum menambah.\"; masih ada sisa tetapi kelebihan = \"Foto tinggal bisa ditambah {sisa} lagi (sudah ada {ada}, maksimal 3).\"; tidak ada yang berubah). Tanpa foto atau kolom foto kosong, foto lama dibiarkan. Untuk menghapus satu foto gunakan DELETE /admin/tipe/{id}/foto/{id_foto}. Tarif yang dikosongkan berarti jenis sewa itu tidak ditawarkan; minimal satu tarif terisi. Tarif baru hanya berlaku untuk pesanan baru. Untuk membuat tipe baru gunakan POST /admin/tipe. nama dan merk dirapikan otomatis dan kombinasinya harus unik tanpa peka huruf besar kecil (tipe itu sendiri diabaikan); bentrok dengan tipe lain dijawab 422 TIPE_SUDAH_ADA, dan bentrok dengan tipe di tempat sampah 422 TIPE_ADA_DI_SAMPAH (lihat POST /admin/tipe)."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+          description: ID tipe
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/TipeInput"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Brio
+                  merk: Honda
+                  kursi: 5
+                  bahan_bakar: bensin
+                  harga_sopir_per_hari: 650000
+                  harga_lepas_kunci_manual: 300000
+                  harga_lepas_kunci_matic: 350000
+                  foto: 3
+                  jumlah_unit: 3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Validasi gagal, termasuk foto yang membuat total melebihi 3; atau code TIPE_SUDAH_ADA bila kombinasi nama + merk sudah ada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tipe Avanza dengan merk Toyota sudah ada.
+                code: TIPE_SUDAH_ADA
+                errors:
+                  nama:
+                    - Tipe Avanza dengan merk Toyota sudah ada.
+  /api/v1/admin/tipe/{id}/foto/{id_foto}:
+    delete:
+      tags:
+        - Admin - Tipe
+      summary: Hapus satu foto tipe
+      description: "Menghapus satu foto milik tipe itu; berkasnya dihapus dari disk setelah berhasil, dan aksinya dicatat di log aktivitas. Tipe boleh punya 0 foto. 404 bila tipe tidak ada, atau foto bukan milik tipe itu. id_foto ada di respons tipe (foto[].id)."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+          description: ID tipe
+        - name: id_foto
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+          description: ID foto (foto[].id pada respons tipe)
+      responses:
+        "200":
+          description: Berhasil; data adalah tipe dengan foto yang tersisa
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 1
+                  nama: Brio
+                  merk: Honda
+                  kursi: 5
+                  bahan_bakar: bensin
+                  harga_sopir_per_hari: 650000
+                  harga_lepas_kunci_manual: 300000
+                  harga_lepas_kunci_matic: 350000
+                  foto:
+                    - id: 8
+                      url: http://127.0.0.1:8000/storage/tipe/1/contoh.jpg
+                  jumlah_foto: 1
+                  jumlah_unit: 3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Tipe tidak ada, atau foto bukan milik tipe itu
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Foto tidak ditemukan pada tipe ini
+                code: TIDAK_DITEMUKAN
+  /api/v1/admin/unit:
+    get:
+      tags:
+        - Admin - Unit
+      summary: Daftar unit
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id_tipe
+          in: query
+          required: false
+          schema:
+            type: integer
+          example: 1
+          description: Filter tipe
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+          example: tersedia
+          description: tersedia, dalam_perawatan, tidak_tersedia
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  - &id008
+                    id: 3
+                    id_tipe: 1
+                    plat_nomor: N 1234 AB
+                    tahun: 2022
+                    warna: Putih
+                    transmisi: manual
+                    km_terakhir: 45800
+                    status: tersedia
+                    detail:
+                      nama_pemilik: PT GantengnyaJatim
+                      status_kepemilikan: milik_perusahaan
+                      no_rangka: MH4001
+                      no_mesin: L15001
+                      no_bpkb: BPKB-001
+                      masa_berlaku_stnk: "2027-03-15"
+                      catatan: ""
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags:
+        - Admin - Unit
+      summary: Tambah unit
+      description: "multipart/form-data, tiap field satu kolom; detail diratakan jadi detail[nama_pemilik], detail[status_kepemilikan], dan seterusnya. Plat unik; status awal tersedia. detail[no_rangka] dan detail[no_mesin] WAJIB; detail[no_bpkb] opsional. Ketiganya bila diisi harus unik di seluruh unit (tanpa peka huruf besar kecil dan tanpa spasi di tepi); yang bentrok dijawab 422 pada kolomnya, mis. \"No rangka sudah dipakai unit lain.\"."
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/UnitForm"
+      responses:
+        "201":
+          description: Unit disimpan
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data: *id008
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: "Validasi gagal (bentrok dengan unit AKTIF: errors per kolom tanpa code khusus); atau UNIT_ADA_DI_SAMPAH bila plat, no rangka, no mesin, atau no BPKB sama dengan unit di tempat sampah (detail memuat unit lama untuk pop-up: pulihkan lewat POST /admin/unit/{id}/pulihkan, atau hapus permanen lewat DELETE /admin/sampah/unit/{id}?konfirmasi=true lalu kirim ulang)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                validasi:
+                  summary: Validasi gagal atau bentrok dengan unit aktif
+                  value:
+                    message: Data yang dikirim tidak valid
+                    code: VALIDASI_GAGAL
+                    errors:
+                      plat_nomor:
+                        - Plat nomor sudah dipakai unit lain.
+                unit_ada_di_sampah:
+                  summary: Bentrok dengan unit di tempat sampah
+                  value:
+                    message: Plat nomor, No rangka sama dengan unit N 1234 AB yang ada di tempat sampah. Pulihkan unit itu, atau hapus permanen dulu lalu buat ulang.
+                    code: UNIT_ADA_DI_SAMPAH
+                    errors:
+                      plat_nomor:
+                        - Plat nomor, No rangka sama dengan unit N 1234 AB yang ada di tempat sampah. Pulihkan unit itu, atau hapus permanen dulu lalu buat ulang.
+                    detail:
+                      jenis: unit
+                      id: 12
+                      plat_nomor: N 1234 AB
+                      kolom_bentrok: [plat_nomor, no_rangka]
+                      punya_riwayat: false
+                      dihapus_pada: "2026-11-20T09:10:00+07:00"
+                      sisa_hari: 28
+  /api/v1/admin/unit/{id}:
+    get:
+      tags:
+        - Admin - Unit
+      summary: Detail unit
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+          description: ID unit
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data: *id008
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    put:
+      tags:
+        - Admin - Unit
+      summary: Ubah unit
+      description: "Bentrok plat atau nomor dengan unit di tempat sampah dijawab 422 UNIT_ADA_DI_SAMPAH beserta detail unit lama (lihat POST /admin/unit). Plat unik (unit sendiri diabaikan). detail.no_rangka dan detail.no_mesin WAJIB (unit lama yang masih kosong harus diisi dulu sebelum bisa diubah); detail.no_bpkb opsional. Ketiganya bila diisi harus unik terhadap unit lain."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+          description: ID unit
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/UnitForm"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data: *id008
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags:
+        - Admin - Unit
+      summary: Hapus unit (ke tempat sampah)
+      description: "Soft delete: hanya mengisi deleted_at, detail unit tetap tersimpan, dan unit bisa dipulihkan lewat POST /admin/unit/{id}/pulihkan. Unit di tempat sampah tidak muncul di daftar admin, katalog, ketersediaan, dan servis. Unit yang punya riwayat pemesanan, serah terima, atau servis BOLEH dihapus; riwayat pesanan, nota, dan laporan tetap menampilkan plat dan data unitnya. Ditolak hanya bila unit sedang disewa (UNIT_SEDANG_DISEWA, ada pesanan berjalan) atau sedang dalam servis (UNIT_DALAM_SERVIS), dan peringatan PESANAN_TERDAMPAK tetap berlaku (ulangi dengan konfirmasi=true). Unit TANPA riwayat dibuang permanen otomatis setelah hari_sampah hari (bawaan 30), atau langsung lewat DELETE /admin/sampah/unit/{id}. Unit BERRIWAYAT tidak pernah dibuang permanen (dilewati sampah:bersihkan, dan hapus permanen dijawab 409 UNIT_PUNYA_RIWAYAT): hanya bisa dipulihkan."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+          description: ID unit
+        - name: konfirmasi
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: true untuk melanjutkan setelah peringatan PESANAN_TERDAMPAK
+      responses:
+        "204":
+          description: Dipindahkan ke tempat sampah
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: UNIT_SEDANG_DISEWA, UNIT_DALAM_SERVIS atau PESANAN_TERDAMPAK (daftar pesanan di respons; ulangi dengan konfirmasi=true)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Unit sedang disewa, tidak bisa dihapus
+                code: UNIT_SEDANG_DISEWA
+  /api/v1/admin/unit/{id}/status:
+    patch:
+      tags:
+        - Admin - Unit
+      summary: Tandai unit tersedia atau tidak tersedia
+      description: "Peringatan pesanan terdampak: kirim ulang dengan konfirmasi true untuk tetap melanjutkan (tanggung jawab admin)."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+          description: ID unit
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum:
+                    - tidak_tersedia
+                    - tersedia
+                  example: tidak_tersedia
+                konfirmasi:
+                  type: boolean
+                  example: false
+              required:
+                - status
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: tidak_tersedia
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Unit disewa, dalam servis, atau pesanan terdampak
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Ada pesanan dikonfirmasi yang membutuhkan unit tipe ini
+                code: PESANAN_TERDAMPAK
+  /api/v1/admin/servis:
+    get:
+      tags:
+        - Admin - Servis
+      summary: Ringkasan, sedang servis, dan riwayat
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  ringkasan:
+                    unit_dalam_servis: 1
+                    unit_tersedia: 4
+                    total_biaya_bengkel: 1100000
+                    total_ditagih: 0
+                    total_ditanggung_perusahaan: 1100000
+                  sedang_servis:
+                    - id: 3
+                      unit: Brio N 4321 XY
+                      tgl_perawatan: "2026-10-16"
+                      jenis_servis: Perbaikan lecet / body
+                      asal_pesanan: PSN-1031
+                  riwayat: []
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags:
+        - Admin - Servis
+      summary: Catat servis baru
+      description: "multipart/form-data, tiap field satu kolom. Unit menjadi dalam_perawatan. Ditolak bila unit disewa. Bila unit tersedia dan ada pesanan terdampak, jawabannya 409 PESANAN_TERDAMPAK berisi daftar pesanan; kirim ulang dengan konfirmasi=true untuk tetap mencatat."
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ServisBuat"
+      responses:
+        "201":
+          description: Servis tersimpan
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 4
+                  status: berlangsung
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Unit disewa, sudah dalam servis, atau PESANAN_TERDAMPAK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Unit sedang disewa, perawatan ditunda
+                code: UNIT_SEDANG_DISEWA
+        "422":
+          $ref: "#/components/responses/Validation"
+  /api/v1/admin/servis/status-unit:
+    get:
+      tags:
+        - Admin - Servis
+      summary: Pengingat servis berkala per unit
+      description: "Aman, segera (sisa 1000 km atau 30 hari), perlu servis. Patokan: servis selesai terakhir; unit yang belum pernah diservis memakai km_awal + interval km dan tanggal dibuat + 6 bulan (servis_terakhir null)."
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  - id_kendaraan: 3
+                    plat_nomor: N 1234 AB
+                    km_terakhir: 45800
+                    servis_terakhir: "2026-10-05"
+                    km_sejak_servis: 1200
+                    km_berikutnya: 49600
+                    tgl_berikutnya: "2027-04-05"
+                    status: aman
+                    sisa_km: 3800
+                    sisa_hari: 140
+                  - id_kendaraan: 4
+                    plat_nomor: N 4321 XY
+                    km_terakhir: 6500
+                    servis_terakhir: null
+                    km_sejak_servis: 4500
+                    km_berikutnya: 7000
+                    tgl_berikutnya: "2027-05-18"
+                    status: segera
+                    sisa_km: 500
+                    sisa_hari: 180
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/servis/{id}/selesai:
+    post:
+      tags:
+        - Admin - Servis
+      summary: Selesai servis
+      description: "multipart/form-data. Ulangi field `komponen[]` untuk tiap komponen (satu baris per nilai, minimal satu). Menghitung km dan tanggal servis berikutnya (interval km + 6 bulan). `biaya_ditagih_ke_penyewa` bukan input: bila servis berasal dari pengembalian (asal_pesanan terisi) nilainya taksiran biaya kerusakan dari pengembalian itu (jumlah biaya kondisi selain baik, bukan jumlah yang sudah dibayar penyewa), selain itu 0; field ini bila dikirim diabaikan. biaya_ditanggung_perusahaan = max(0, biaya_bengkel - biaya_ditagih_ke_penyewa)."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 4
+          description: ID servis
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ServisSelesai"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: selesai
+                  km_berikutnya: 51100
+                  tgl_berikutnya: "2027-05-20"
+                  biaya_ditanggung_perusahaan: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/servis/{id}/batal:
+    post:
+      tags:
+        - Admin - Servis
+      summary: Batal servis
+      description: Unit kembali tersedia.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 4
+          description: ID servis
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  status: dibatalkan
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/servis/interval:
+    put:
+      tags:
+        - Admin - Servis
+      summary: Ubah interval servis (km)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                interval_km:
+                  type: integer
+                  example: 5000
+                  minimum: 1
+              required:
+                - interval_km
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  interval_km: 5000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/dashboard:
+    get:
+      tags:
+        - Admin - Dashboard dan Laporan
+      summary: Dashboard admin
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  hitungan:
+                    menunggu_pembayaran: 1
+                    dikonfirmasi: 2
+                    berjalan: 1
+                    pengajuan_pembatalan: 1
+                    unit_tersedia: 4
+                    unit_dalam_servis: 1
+                  tugas_admin:
+                    - id: 12
+                      jenis: pengajuan_pembatalan
+                      keterangan: Pengajuan pembatalan dari Andi
+                  pengingat_servis:
+                    - id_kendaraan: 3
+                      plat_nomor: N 1234 AB
+                      status: segera
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      description: "`tugas_admin` berjenis: pengajuan_pembatalan, refund_transfer_admin, serahkan_unit, pengembalian_jatuh_tempo, tagihan_belum_dibayar, jaminan_siap_dikembalikan."
+  /api/v1/admin/laporan:
+    get:
+      tags:
+        - Admin - Dashboard dan Laporan
+      summary: Laporan transaksi
+      description: Periode bulan_ini berakhir hari ini; bulan_lalu satu bulan penuh. JSON selalu 200 walau kosong.
+      security:
+        - bearerAuth: []
+      parameters:
+        - &id009
+          name: periode
+          in: query
+          required: false
+          schema:
+            type: string
+          example: "7"
+          description: 7 (bawaan), 30, bulan_ini, bulan_lalu
+        - &id010
+          name: status
+          in: query
+          required: false
+          schema:
+            type: string
+          example: selesai
+          description: "Opsional: satu nilai status pesanan"
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  periode:
+                    dari: "2026-11-07"
+                    sampai: "2026-11-13"
+                  ringkasan:
+                    total_pendapatan: 3200000
+                    jumlah_transaksi: 6
+                    jumlah_dibatalkan: 1
+                    per_status:
+                      dikonfirmasi: 2
+                      berjalan: 1
+                      selesai: 2
+                      dibatalkan: 1
+                  data:
+                    - tgl_mulai: "2026-11-08"
+                      nomor: PSN-1038
+                      pelanggan: Budi Santoso
+                      unit: Innova N 7788 IJ
+                      status: selesai
+                      sewa: 1800000
+                      tagihan_tambahan: 180000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/admin/laporan/pdf:
+    get:
+      tags:
+        - Admin - Dashboard dan Laporan
+      summary: Laporan transaksi PDF
+      security:
+        - bearerAuth: []
+      parameters:
+        - *id009
+        - *id010
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Data kosong
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tidak ada data pada periode ini
+                code: DATA_KOSONG
+      description: 409 DATA_KOSONG bila tidak ada data (hanya untuk PDF).
+  /api/v1/admin/sampah:
+    get:
+      tags:
+        - Admin - Tempat Sampah
+      summary: Daftar tipe dan unit di tempat sampah
+      description: "Tipe dan unit yang dihapus lewat DELETE /admin/tipe/{id} atau DELETE /admin/unit/{id} (soft delete), terbaru dulu. Tiap data memuat dihapus_pada dan sisa_hari sebelum dibuang permanen oleh perintah terjadwal sampah:bersihkan (batas hari_sampah, bawaan 30; 0 berarti sudah lewat dan menunggu pembersihan berikutnya). Khusus unit: punya_riwayat menandai unit yang pernah dipakai pesanan, serah terima, atau servis; unit itu tidak pernah dibuang permanen sehingga sisa_hari-nya null dan hanya bisa dipulihkan. Data di sini tidak muncul di katalog, daftar admin, dan ketersediaan; riwayat pesanan, nota, dan laporan tetap menampilkan unitnya."
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Sampah"
+              example:
+                data:
+                  hari_sampah: 30
+                  tipe:
+                    - id: 5
+                      nama: Brio
+                      merk: Honda
+                      kursi: 5
+                      bahan_bakar: bensin
+                      jumlah_foto: 2
+                      jumlah_unit_di_sampah: 1
+                      dihapus_pada: "2026-11-20T09:15:00+07:00"
+                      sisa_hari: 28
+                  unit:
+                    - id: 12
+                      plat_nomor: N 1234 AB
+                      tahun: 2022
+                      warna: Putih
+                      transmisi: manual
+                      tipe:
+                        id: 5
+                        nama: Brio
+                        terhapus: true
+                      punya_riwayat: false
+                      dihapus_pada: "2026-11-20T09:10:00+07:00"
+                      sisa_hari: 28
+                    - id: 13
+                      plat_nomor: N 5678 CD
+                      tahun: 2021
+                      warna: Hitam
+                      transmisi: matic
+                      tipe:
+                        id: 6
+                        nama: Avanza
+                        terhapus: false
+                      punya_riwayat: true
+                      dihapus_pada: "2026-11-21T10:00:00+07:00"
+                      sisa_hari: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Bukan admin
+  /api/v1/admin/tipe/{id}/pulihkan:
+    post:
+      tags:
+        - Admin - Tempat Sampah
+      summary: Pulihkan tipe dari tempat sampah
+      description: "Mengembalikan tipe beserta foto dan tarifnya. Dicatat di log aktivitas. Bentrok keunikan tidak mungkin terjadi: selama tipe di tempat sampah, pembuatan tipe baru dengan nama + merk yang sama ditolak (TIPE_ADA_DI_SAMPAH)."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 5
+          description: ID tipe di tempat sampah
+      responses:
+        "200":
+          description: Dipulihkan; isi sama dengan GET /admin/tipe/{id}
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Tipe tidak ada sama sekali
+        "409":
+          description: TIDAK_DI_SAMPAH (tipe masih aktif)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tipe ini masih aktif, tidak ada di tempat sampah
+                code: TIDAK_DI_SAMPAH
+  /api/v1/admin/unit/{id}/pulihkan:
+    post:
+      tags:
+        - Admin - Tempat Sampah
+      summary: Pulihkan unit dari tempat sampah
+      description: "Mengembalikan unit beserta detailnya. Hanya bila tipenya aktif; bila tipenya juga di tempat sampah, dijawab 409 UNIT_TIPE_DI_SAMPAH dan tipe harus dipulihkan dulu (POST /admin/tipe/{id}/pulihkan). Dicatat di log aktivitas."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 12
+          description: ID unit di tempat sampah
+      responses:
+        "200":
+          description: Dipulihkan; isi sama dengan GET /admin/unit/{id}
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Unit tidak ada sama sekali
+        "409":
+          description: TIDAK_DI_SAMPAH (unit masih aktif) atau UNIT_TIPE_DI_SAMPAH (pulihkan tipenya dulu)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Tipe unit ini ada di tempat sampah. Pulihkan tipe Brio dulu, lalu pulihkan unit.
+                code: UNIT_TIPE_DI_SAMPAH
+                detail:
+                  jenis: tipe
+                  id: 5
+                  nama: Brio
+                  merk: Honda
+  /api/v1/admin/sampah/tipe/{id}:
+    delete:
+      tags:
+        - Admin - Tempat Sampah
+      summary: Hapus permanen satu tipe di tempat sampah
+      description: "TIDAK bisa dibatalkan. Wajib konfirmasi=true (query atau body); tanpa itu 409 KONFIRMASI_DIPERLUKAN dan tidak ada yang berubah (respons memuat detail.unit_ikut_dihapus dan detail.foto_dihapus sebagai gambaran). Hanya untuk tipe yang sudah di tempat sampah: tipe aktif dijawab 409 TIDAK_DI_SAMPAH, tidak ada sama sekali 404. Foto (baris dan berkas) ikut terhapus, dan unit milik tipe itu yang juga di tempat sampah ikut dibuang permanen. Dicatat di log aktivitas. Dipakai untuk pilihan 'hapus permanen lalu buat baru' setelah TIPE_ADA_DI_SAMPAH."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 5
+          description: ID tipe di tempat sampah
+        - name: konfirmasi
+          in: query
+          required: true
+          schema:
+            type: boolean
+          description: Harus true
+      responses:
+        "200":
+          description: Dihapus permanen
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 5
+                  unit_ikut_dihapus: 1
+                  foto_dihapus: 2
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Tipe tidak ada sama sekali
+        "409":
+          description: KONFIRMASI_DIPERLUKAN, TIDAK_DI_SAMPAH, atau TIPE_MASIH_DIPAKAI (bila data tidak konsisten dan masih ada unit aktif atau pesanan)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Hapus permanen tipe Brio tidak bisa dibatalkan. Kirim ulang dengan konfirmasi=true.
+                code: KONFIRMASI_DIPERLUKAN
+                detail:
+                  jenis: tipe
+                  id: 5
+                  nama: Brio
+                  merk: Honda
+                  unit_ikut_dihapus: 1
+                  foto_dihapus: 2
+  /api/v1/admin/sampah/unit/{id}:
+    delete:
+      tags:
+        - Admin - Tempat Sampah
+      summary: Hapus permanen satu unit di tempat sampah
+      description: "TIDAK bisa dibatalkan. Wajib konfirmasi=true (query atau body); tanpa itu 409 KONFIRMASI_DIPERLUKAN. Hanya untuk unit yang sudah di tempat sampah dan TANPA riwayat: unit aktif dijawab 409 TIDAK_DI_SAMPAH, tidak ada sama sekali 404, unit berriwayat 409 UNIT_PUNYA_RIWAYAT (dicek sebelum konfirmasi; sarannya memulihkan unit). Detail unit ikut terhapus. Dicatat di log aktivitas. Dipakai untuk pilihan 'hapus permanen lalu buat baru' setelah UNIT_ADA_DI_SAMPAH."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 12
+          description: ID unit di tempat sampah
+        - name: konfirmasi
+          in: query
+          required: true
+          schema:
+            type: boolean
+          description: Harus true
+      responses:
+        "200":
+          description: Dihapus permanen
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                data:
+                  id: 12
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Unit tidak ada sama sekali
+        "409":
+          description: "KONFIRMASI_DIPERLUKAN, TIDAK_DI_SAMPAH, atau UNIT_PUNYA_RIWAYAT (unit pernah dipakai pesanan, serah terima, atau servis: tidak pernah dibuang permanen, pulihkan saja)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                tidak_di_sampah:
+                  value:
+                    message: Unit ini masih aktif, tidak ada di tempat sampah
+                    code: TIDAK_DI_SAMPAH
+                unit_punya_riwayat:
+                  value:
+                    message: Unit N 5678 CD punya riwayat pesanan atau servis sehingga tidak bisa dibuang permanen. Pulihkan saja unit ini.
+                    code: UNIT_PUNYA_RIWAYAT
+                    detail:
+                      jenis: unit
+                      id: 13
+                      plat_nomor: N 5678 CD
+                      punya_riwayat: true
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Sanctum token
+  schemas:
+    Error:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Mobil sudah dipesan pada tanggal tersebut
+        code:
+          type: string
+          example: UNIT_TIDAK_TERSEDIA
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            email:
+              - Email sudah terdaftar
+        detail:
+          $ref: "#/components/schemas/SampahDetail"
+    Meta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        per_page:
+          type: integer
+          example: 10
+        total:
+          type: integer
+          example: 25
+    Aksi:
+      type: object
+      properties:
+        bisa_bayar:
+          type: boolean
+          example: false
+        bisa_batalkan:
+          type: boolean
+          example: false
+        bisa_ajukan_pembatalan:
+          type: boolean
+          example: true
+        bisa_review:
+          type: boolean
+          example: false
+        bisa_unduh_nota:
+          type: boolean
+          example: true
+        bisa_perpanjang:
+          type: boolean
+          example: false
+        bisa_pesan_lagi:
+          type: boolean
+          example: false
+      description: 7 kunci pada pesanan milik user
+    RegisterRequest:
+      type: object
+      properties:
+        nama:
+          type: string
+          example: Budi Santoso
+          maxLength: 100
+        email:
+          type: string
+          example: budi@email.com
+          format: email
+        no_hp:
+          type: string
+          example: "081234567890"
+          pattern: ^(\+62|62|0)8[1-9][0-9]{6,11}$
+        provinsi:
+          type: string
+          example: Jawa Timur
+        kota:
+          type: string
+          example: Kota Malang
+        password:
+          type: string
+          example: rahasia123
+          minLength: 8
+          description: Minimal 8 karakter dan mengandung angka
+        password_confirmation:
+          type: string
+          example: rahasia123
+      required:
+        - nama
+        - email
+        - no_hp
+        - provinsi
+        - kota
+        - password
+        - password_confirmation
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          example: budi@email.com
+          format: email
+        password:
+          type: string
+          example: rahasia123
+      required:
+        - email
+        - password
+    PemesananBuat:
+      type: object
+      properties:
+        id_tipe:
+          type: integer
+          example: 1
+        jenis_sewa:
+          type: string
+          enum:
+            - dengan_sopir
+            - lepas_kunci
+          example: lepas_kunci
+        tgl_mulai:
+          type: string
+          example: "2026-12-10"
+          format: date
+          description: Paling cepat besok, paling jauh 30 hari dari hari ini
+        durasi:
+          type: integer
+          example: 3
+          minimum: 1
+          maximum: 30
+        jam_serah:
+          type: string
+          example: 09:00
+          description: "Lepas kunci: 07:00 sampai 21:00. Dengan sopir: bebas"
+        metode_ambil:
+          type: string
+          enum:
+            - ambil_di_kantor
+            - diantar
+          example: diantar
+          description: Hanya untuk lepas_kunci
+        lokasi_jemput:
+          type: string
+          example: Jl. Veteran No. 5, Malang
+          description: Wajib untuk dengan_sopir; untuk lepas_kunci hanya jika diantar
+        tujuan:
+          type: string
+          example: Malang, Batu
+          description: Wajib untuk dengan_sopir, teks bebas
+        catatan:
+          type: string
+          example: Mohon unit bersih
+        setuju_syarat:
+          type: boolean
+          example: true
+        transmisi:
+          type: string
+          enum:
+            - manual
+            - matic
+          example: manual
+          description: Wajib untuk lepas_kunci
+        setuju_syarat_jaminan:
+          type: boolean
+          example: true
+          description: Wajib untuk lepas_kunci
+      required:
+        - id_tipe
+        - jenis_sewa
+        - tgl_mulai
+        - durasi
+        - jam_serah
+        - setuju_syarat
+    AjukanPembatalan:
+      type: object
+      properties:
+        alasan:
+          type: string
+          example: Jadwal berubah
+        bank:
+          type: string
+          example: BCA
+          description: Wajib untuk pembayaran virtual account
+        no_rekening:
+          type: string
+          example: "1234567890"
+        nama_rekening:
+          type: string
+          example: Budi Santoso
+      required:
+        - alasan
+    ReviewBuat:
+      type: object
+      properties:
+        rating:
+          type: integer
+          example: 5
+          minimum: 1
+          maximum: 5
+        komentar:
+          type: string
+          example: Mobil bersih dan nyaman
+          maxLength: 500
+      required:
+        - rating
+    SerahTerimaForm:
+      type: object
+      description: "multipart/form-data. Untuk lepas_kunci: jaminan[dokumen_tambahan] (jenis dokumen, teks) dan foto jaminan per item di foto_jaminan[item] (berkas jpg atau png, maks 2 MB). Item wajib menurut domisili berlaku: malang_raya = ktp_asli, sim_c_asli, dokumen_tambahan, motor_stnk; luar_malang_raya = ktp_asli, sim_c_asli, dokumen_tambahan, booking_transportasi, booking_hotel. Untuk dengan_sopir hanya id_kendaraan (dan catatan, foto kondisi) yang dipakai. Nama field foto harus memakai kurung siku, mis. foto_jaminan[ktp_asli]."
+      properties:
+        id_kendaraan:
+          type: integer
+          example: 3
+          description: Harus ada di daftar unit dari endpoint unit-tersedia
+        catatan_kondisi:
+          type: string
+          example: Ada baret halus di kap
+        no_identitas:
+          type: string
+          example: "3573010000000009"
+          description: Wajib untuk lepas_kunci
+        odometer_awal:
+          type: integer
+          example: 45800
+          description: Wajib untuk lepas_kunci
+        bbm_awal:
+          type: string
+          enum:
+            - penuh
+            - tiga_perempat
+            - setengah
+            - seperempat
+            - hampir_kosong
+          example: penuh
+          description: Wajib untuk lepas_kunci
+        domisili_disesuaikan:
+          type: string
+          enum:
+            - malang_raya
+            - luar_malang_raya
+          description: Isi bila KTP berbeda dengan domisili pesanan; menentukan foto jaminan yang wajib
+        jaminan[dokumen_tambahan]:
+          type: string
+          enum:
+            - ktm
+            - kk
+            - npwp
+            - bpjs
+            - paspor
+          example: kk
+          description: Jenis dokumen tambahan. Wajib untuk lepas_kunci
+        foto_jaminan[ktp_asli]:
+          type: string
+          format: binary
+          description: "Wajib untuk lepas_kunci. jpg atau png, maks 2 MB."
+        foto_jaminan[sim_c_asli]:
+          type: string
+          format: binary
+          description: "Wajib untuk lepas_kunci. jpg atau png, maks 2 MB."
+        foto_jaminan[dokumen_tambahan]:
+          type: string
+          format: binary
+          description: "Wajib untuk lepas_kunci (foto dokumen yang dipilih di jaminan[dokumen_tambahan]). jpg atau png, maks 2 MB."
+        foto_jaminan[motor_stnk]:
+          type: string
+          format: binary
+          description: "Wajib bila domisili malang_raya. jpg atau png, maks 2 MB."
+        foto_jaminan[booking_transportasi]:
+          type: string
+          format: binary
+          description: "Wajib bila domisili luar_malang_raya. jpg atau png, maks 2 MB."
+        foto_jaminan[booking_hotel]:
+          type: string
+          format: binary
+          description: "Wajib bila domisili luar_malang_raya. jpg atau png, maks 2 MB."
+        foto_kondisi[]:
+          type: array
+          items:
+            type: string
+            format: binary
+          maxItems: 10
+          description: "Opsional. Berkas gambar, maksimal 5 MB per berkas dan 10 berkas. Hapus item bawaan Swagger di kolom ini bila tidak mengunggah foto."
+      required:
+        - id_kendaraan
+    PengembalianForm:
+      type: object
+      description: "multipart/form-data, diratakan agar mudah diisi di Swagger. Wajib 8 bagian mobil (depan, belakang, sisi_kiri, sisi_kanan, atap, kaca_lampu, ban_velg, interior) di kondisi[bagian]; bagian yang bukan baik wajib punya biaya[bagian] dan foto[bagian]. Kolom lepas kunci (odometer_akhir, bbm_akhir, biaya_kekurangan_bbm, kebersihan) hanya wajib untuk lepas_kunci. Nama field memakai kurung siku. Kosongkan (hapus) kolom foto yang tidak dipakai."
+      properties:
+        tgl_kembali:
+          type: string
+          format: date
+          example: "2026-12-12"
+        jam_kembali:
+          type: string
+          example: "18:30"
+        odometer_akhir:
+          type: integer
+          example: 46100
+          description: Wajib untuk lepas_kunci
+        bbm_akhir:
+          type: string
+          enum:
+            - penuh
+            - tiga_perempat
+            - setengah
+            - seperempat
+            - hampir_kosong
+          example: penuh
+          description: Wajib untuk lepas_kunci
+        biaya_kekurangan_bbm:
+          type: integer
+          example: 0
+          description: Wajib untuk lepas_kunci
+        kebersihan:
+          type: string
+          enum:
+            - bersih
+            - kotor_biasa
+            - sangat_kotor
+          example: bersih
+          description: Wajib untuk lepas_kunci
+        kondisi[depan]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian depan."
+        kondisi[belakang]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian belakang."
+        kondisi[sisi_kiri]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian sisi kiri."
+        kondisi[sisi_kanan]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian sisi kanan."
+        kondisi[atap]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian atap."
+        kondisi[kaca_lampu]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian kaca lampu."
+        kondisi[ban_velg]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian ban velg."
+        kondisi[interior]:
+          type: string
+          enum:
+            - baik
+            - lecet
+            - penyok
+            - retak
+            - rusak
+          example: baik
+          description: "Wajib. Bagian interior."
+        biaya[depan]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian depan. Wajib bila kondisi[depan] bukan baik; diabaikan bila baik."
+        biaya[belakang]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian belakang. Wajib bila kondisi[belakang] bukan baik; diabaikan bila baik."
+        biaya[sisi_kiri]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian sisi kiri. Wajib bila kondisi[sisi_kiri] bukan baik; diabaikan bila baik."
+        biaya[sisi_kanan]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian sisi kanan. Wajib bila kondisi[sisi_kanan] bukan baik; diabaikan bila baik."
+        biaya[atap]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian atap. Wajib bila kondisi[atap] bukan baik; diabaikan bila baik."
+        biaya[kaca_lampu]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian kaca lampu. Wajib bila kondisi[kaca_lampu] bukan baik; diabaikan bila baik."
+        biaya[ban_velg]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian ban velg. Wajib bila kondisi[ban_velg] bukan baik; diabaikan bila baik."
+        biaya[interior]:
+          type: integer
+          example: 0
+          description: "Biaya perbaikan bagian interior. Wajib bila kondisi[interior] bukan baik; diabaikan bila baik."
+        keterangan[depan]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[belakang]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[sisi_kiri]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[sisi_kanan]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[atap]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[kaca_lampu]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[ban_velg]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan[interior]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        foto[depan]:
+          type: string
+          format: binary
+          description: "Foto bagian depan. Wajib bila kondisi[depan] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[belakang]:
+          type: string
+          format: binary
+          description: "Foto bagian belakang. Wajib bila kondisi[belakang] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[sisi_kiri]:
+          type: string
+          format: binary
+          description: "Foto bagian sisi kiri. Wajib bila kondisi[sisi_kiri] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[sisi_kanan]:
+          type: string
+          format: binary
+          description: "Foto bagian sisi kanan. Wajib bila kondisi[sisi_kanan] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[atap]:
+          type: string
+          format: binary
+          description: "Foto bagian atap. Wajib bila kondisi[atap] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[kaca_lampu]:
+          type: string
+          format: binary
+          description: "Foto bagian kaca lampu. Wajib bila kondisi[kaca_lampu] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[ban_velg]:
+          type: string
+          format: binary
+          description: "Foto bagian ban velg. Wajib bila kondisi[ban_velg] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        foto[interior]:
+          type: string
+          format: binary
+          description: "Foto bagian interior. Wajib bila kondisi[interior] bukan baik (tidak diminta di preview). Gambar, maks 5 MB, satu berkas per bagian. Tersimpan di penyimpanan privat dan terkait ke bagiannya."
+        biaya_tambahan[cuci]:
+          type: integer
+          description: "Nominal rupiah untuk cuci. Kosong atau 0 berarti tidak ada. Satu isian per jenis."
+        biaya_tambahan[kelengkapan_hilang]:
+          type: integer
+          description: "Nominal rupiah untuk kelengkapan hilang. Kosong atau 0 berarti tidak ada. Satu isian per jenis."
+        biaya_tambahan[biaya_antar]:
+          type: integer
+          description: "Nominal rupiah untuk biaya antar. Kosong atau 0 berarti tidak ada. Satu isian per jenis."
+        biaya_tambahan[lainnya]:
+          type: integer
+          description: "Nominal rupiah untuk lainnya. Kosong atau 0 berarti tidak ada. Satu isian per jenis."
+        keterangan_tambahan[cuci]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan_tambahan[kelengkapan_hilang]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan_tambahan[biaya_antar]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        keterangan_tambahan[lainnya]:
+          type: string
+          description: "Opsional, maks 255 karakter."
+        disetujui_penyewa:
+          type: boolean
+          example: true
+          description: Wajib true (tidak diminta di preview). Dikirim sebagai teks true atau false.
+        catatan_admin:
+          type: string
+        status_pembayaran_tagihan:
+          type: string
+          enum:
+            - belum_dibayar
+            - tunai
+            - transfer
+          example: tunai
+        unit_perlu_servis:
+          type: boolean
+          example: false
+        servis[tingkat]:
+          type: string
+          enum:
+            - ringan
+            - sedang
+            - perlu_bengkel
+          description: Wajib bila unit_perlu_servis true
+        servis[keperluan]:
+          type: string
+          description: Wajib bila unit_perlu_servis true (maks 100 karakter)
+      required:
+        - tgl_kembali
+        - jam_kembali
+        - kondisi[depan]
+        - kondisi[belakang]
+        - kondisi[sisi_kiri]
+        - kondisi[sisi_kanan]
+        - kondisi[atap]
+        - kondisi[kaca_lampu]
+        - kondisi[ban_velg]
+        - kondisi[interior]
+        - disetujui_penyewa
+    TipeInput:
+      type: object
+      properties:
+        nama:
+          type: string
+          example: Brio
+          description: "Dirapikan otomatis (mis. iNNOva rEBORN menjadi Innova Reborn). Bersama merk harus unik tanpa peka huruf besar kecil."
+        merk:
+          type: string
+          example: Honda
+          description: "Dirapikan otomatis (mis. tOYOta menjadi Toyota). Bersama nama harus unik tanpa peka huruf besar kecil."
+        kursi:
+          type: integer
+          example: 5
+        bahan_bakar:
+          type: string
+          enum:
+            - bensin
+            - diesel
+          example: bensin
+        harga_sopir_per_hari:
+          type: integer
+          example: 650000
+          minimum: 1
+        harga_lepas_kunci_manual:
+          type: integer
+          example: 300000
+          minimum: 1
+        harga_lepas_kunci_matic:
+          type: integer
+          example: 350000
+          minimum: 1
+        foto[]:
+          type: array
+          items:
+            type: string
+            format: binary
+          maxItems: 3
+          description: "jpg atau png, maks 2 MB per berkas. Maksimal 3 berkas per permintaan dan total 3 foto per tipe (saat ubah, foto ditambahkan ke yang sudah ada). Nama field harus foto[] (dengan kurung siku) agar dibaca PHP sebagai daftar."
+      required:
+        - nama
+        - merk
+        - kursi
+        - bahan_bakar
+      description: 'Tarif minimal 1 (0 sama dengan tidak ditawarkan). Foto: pilih berkas gambar, maksimal 3. Kalau tidak mengunggah foto, hapus item "string" bawaan Swagger di kolom foto.'
+    UnitForm:
+      type: object
+      description: "Form untuk POST /admin/unit (multipart/form-data) dan PUT /admin/unit/{id} (x-www-form-urlencoded). Objek detail diratakan dengan kurung siku. Kolom opsional boleh dikosongkan."
+      properties:
+        id_tipe:
+          type: integer
+          example: 1
+        plat_nomor:
+          type: string
+          example: N 1234 AB
+          description: "Dirapikan otomatis (huruf besar, satu spasi antar bagian, mis. n1234ab menjadi N 1234 AB). Pola umum: 1-2 huruf, 1-4 angka, 0-3 huruf; selain itu 422. Unik tanpa peka huruf besar kecil dan tanpa spasi (N1234AB sama dengan n 1234 ab); yang sudah dipakai unit lain dijawab 422 \"Plat nomor sudah dipakai unit lain.\"."
+        tahun:
+          type: integer
+          example: 2022
+        warna:
+          type: string
+          example: Putih
+        transmisi:
+          type: string
+          enum:
+            - manual
+            - matic
+          example: manual
+        km_terakhir:
+          type: integer
+          example: 45800
+          description: Opsional; kosong = 0
+        detail[nama_pemilik]:
+          type: string
+          example: PT GantengnyaJatim
+          description: Opsional
+        detail[status_kepemilikan]:
+          type: string
+          enum:
+            - milik_perusahaan
+            - titipan
+          example: milik_perusahaan
+          description: Opsional; kosong = milik_perusahaan
+        detail[no_rangka]:
+          type: string
+          example: MH4001
+          description: "WAJIB. Unik tanpa peka huruf besar kecil dan tanpa spasi di tepi. Kosong: 422 \"No rangka wajib diisi.\"."
+        detail[no_mesin]:
+          type: string
+          example: L15001
+          description: "WAJIB. Unik tanpa peka huruf besar kecil dan tanpa spasi di tepi. Kosong: 422 \"No mesin wajib diisi.\"."
+        detail[no_bpkb]:
+          type: string
+          example: BPKB-001
+          description: Opsional; bila diisi harus unik
+        detail[masa_berlaku_stnk]:
+          type: string
+          format: date
+          example: "2027-03-15"
+          description: Opsional, format YYYY-MM-DD
+        detail[catatan]:
+          type: string
+          description: Opsional
+      required:
+        - id_tipe
+        - plat_nomor
+        - tahun
+        - warna
+        - transmisi
+        - detail[no_rangka]
+        - detail[no_mesin]
+    ServisBuat:
+      type: object
+      properties:
+        id_kendaraan:
+          type: integer
+          example: 3
+        jenis_servis:
+          type: string
+          example: Servis berkala
+        tingkat_servis:
+          type: string
+          enum:
+            - ringan
+            - sedang
+            - perlu_bengkel
+          example: ringan
+        tgl_perawatan:
+          type: string
+          example: "2026-11-20"
+          format: date
+        bengkel:
+          type: string
+          example: Bengkel Rekanan
+        km_saat_ini:
+          type: integer
+          example: 46100
+          description: Opsional
+        catatan:
+          type: string
+          example: ""
+          description: Opsional
+        konfirmasi:
+          type: boolean
+          example: false
+          description: Dikirim sebagai teks true atau false. true untuk tetap mencatat setelah peringatan pesanan terdampak
+      required:
+        - id_kendaraan
+        - jenis_servis
+        - tingkat_servis
+        - tgl_perawatan
+        - bengkel
+      description: "multipart/form-data untuk POST /admin/servis. km_saat_ini, catatan, dan konfirmasi opsional dan boleh dikosongkan."
+    GantiPassword:
+      type: object
+      properties:
+        password_lama:
+          type: string
+          example: lama12345
+        password_baru:
+          type: string
+          minLength: 8
+          example: baru12345
+          description: Minimal 8 karakter dan ada angka
+        konfirmasi:
+          type: string
+          example: baru12345
+          description: Harus sama dengan password_baru
+      required:
+        - password_lama
+        - password_baru
+        - konfirmasi
+    ProfilForm:
+      type: object
+      description: "multipart/form-data. Semua field opsional (tidak ada yang wajib): kirim hanya yang ingin diubah. Admin hanya memakai nama (dan foto). Email, no_identitas, dan role diabaikan. Foto: tanpa field foto, foto lama tetap; foto baru mengganti foto lama (berkas lama dihapus); hapus_foto=true mengosongkan foto. Bila foto dan hapus_foto=true dikirim bersamaan, foto yang berlaku."
+      properties:
+        nama:
+          type: string
+          maxLength: 100
+          example: Budi Santoso
+        no_hp:
+          type: string
+          example: "081234567890"
+        provinsi:
+          type: string
+          example: Jawa Timur
+        kota:
+          type: string
+          example: Kota Malang
+        foto:
+          type: string
+          format: binary
+          description: "Opsional. jpg, jpeg, png, atau webp, maks 2 MB. Satu foto per akun: mengganti foto lama."
+        hapus_foto:
+          type: boolean
+          default: false
+          description: "Opsional. true = hapus foto profil (menjadi null) dan berkasnya dihapus dari disk."
+    ServisSelesai:
+      type: object
+      properties:
+        komponen[]:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Ulangi field komponen[] untuk tiap komponen
+          example:
+            - Oli mesin dan filter
+            - Rem
+        biaya_bengkel:
+          type: integer
+          minimum: 0
+          example: 850000
+        km_saat_ini:
+          type: integer
+          minimum: 0
+          description: Tidak boleh lebih kecil dari km terakhir unit.
+          example: 46100
+      required:
+        - komponen[]
+        - biaya_bengkel
+        - km_saat_ini
+      example:
+        komponen[]:
+          - Oli mesin dan filter
+          - Rem
+        biaya_bengkel: 850000
+        km_saat_ini: 46100
+    SampahDetail:
+      type: object
+      description: "Data lama yang bentrok di tempat sampah, untuk pop-up tiga pilihan (pulihkan, hapus permanen lalu buat baru, atau batal). Dipakai pada code TIPE_ADA_DI_SAMPAH, UNIT_ADA_DI_SAMPAH, UNIT_TIPE_DI_SAMPAH, dan KONFIRMASI_DIPERLUKAN. Bila beberapa unit di tempat sampah bentrok sekaligus, yang dilaporkan unit dengan id terkecil; selesaikan, lalu kirim ulang untuk melihat berikutnya. Untuk unit, punya_riwayat=true berarti frontend hanya menawarkan pulihkan (tanpa tombol hapus permanen) dan sisa_hari null."
+      properties:
+        jenis:
+          type: string
+          enum: [tipe, unit]
+        id:
+          type: integer
+          example: 5
+        nama:
+          type: string
+          description: Hanya untuk tipe
+          example: Brio
+        merk:
+          type: string
+          description: Hanya untuk tipe
+          example: Honda
+        plat_nomor:
+          type: string
+          description: Hanya untuk unit
+          example: N 1234 AB
+        kolom_bentrok:
+          type: array
+          description: "Tipe: nama dan merk. Unit: satu atau lebih dari plat_nomor, no_rangka, no_mesin, no_bpkb"
+          items:
+            type: string
+          example: [plat_nomor, no_rangka]
+        dihapus_pada:
+          type: string
+          format: date-time
+          example: "2026-11-20T09:15:00+07:00"
+        sisa_hari:
+          type: integer
+          nullable: true
+          description: Hari sebelum dibuang permanen otomatis (0 bila sudah lewat batas); null untuk unit berriwayat
+          example: 28
+        punya_riwayat:
+          type: boolean
+          description: Hanya untuk unit. true bila unit pernah dipakai pesanan, serah terima, atau servis (tidak bisa dihapus permanen)
+          example: false
+    Sampah:
+      type: object
+      properties:
+        hari_sampah:
+          type: integer
+          description: Batas hari di tempat sampah (config rental.hari_sampah)
+          example: 30
+        tipe:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              nama:
+                type: string
+              merk:
+                type: string
+              kursi:
+                type: integer
+              bahan_bakar:
+                type: string
+              jumlah_foto:
+                type: integer
+              jumlah_unit_di_sampah:
+                type: integer
+              dihapus_pada:
+                type: string
+                format: date-time
+              sisa_hari:
+                type: integer
+        unit:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              plat_nomor:
+                type: string
+              tahun:
+                type: integer
+              warna:
+                type: string
+              transmisi:
+                type: string
+              tipe:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  nama:
+                    type: string
+                  terhapus:
+                    type: boolean
+                    description: true bila tipenya juga di tempat sampah (pulihkan tipe dulu)
+              punya_riwayat:
+                type: boolean
+                description: true bila unit pernah dipakai pesanan, serah terima, atau servis; tidak pernah dibuang permanen
+              dihapus_pada:
+                type: string
+                format: date-time
+              sisa_hari:
+                type: integer
+                nullable: true
+                description: Hari sebelum dibuang permanen; null bila punya_riwayat
+  responses:
+    Unauthorized:
+      description: Belum login atau token tidak valid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Belum login
+            code: BELUM_LOGIN
+    TerlaluBanyak:
+      description: Lebih dari 5 percobaan per menit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Terlalu banyak percobaan, coba lagi nanti
+            code: TERLALU_BANYAK_PERCOBAAN
+    Validation:
+      description: Validasi gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Data yang dikirim tidak valid
+            code: VALIDASI_GAGAL
+            errors:
+              email:
+                - Email sudah terdaftar
